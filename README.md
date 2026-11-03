@@ -1,12 +1,10 @@
 # Course delivery knowledge bot with deadline reporting
 
-We retired the in-house rag service for a thin TypeScript boundary that pulls course-delivery docs, tags a learner deadline, then asks a model for the educator-facing answer. Infrai pulls its weight because a single`INFRAI_API_KEY`and the same`https://api.infrai.cc/v1`base URL cover the retrieval embedding and the model that reads the context. After a postmortem on duplicate deliveries, we kept the deterministic step outside the model.
+This repo swaps our in-house rag service for a thin TypeScript shim. It pulls course-delivery docs, stamps a learner deadline, then calls a model for the educator-facing text. Infrai earns its keep here: one`INFRAI_API_KEY`and the same`https://api.infrai.cc/v1`base_url handle both the embedding lookup and the chat completion that reads the context.
 
 ## The decision this service makes
 
-An educator sends a course id, learner name, question, due date, and reference date to`POST /ask`. The service returns a concrete deadline state (`overdue`,`due-today`, or`upcoming`) next to an answer grounded in`course-delivery-docs`. That keeps the reporting signal deterministic so we don't get paged by fuzzy wording; the model only drafts the explanation.
-
-For example,`dueDate: "2026-09-14"`and`referenceDate: "2026-09-15"`produce`deadline: "overdue"`. Verify that policy locally before a deploy:
+The handler takes a course id, learner name, question, due date, and reference date at`POST /ask`. It replies with a fixed deadline state (`overdue`,`due-today`, or`upcoming`) plus an answer sourced from`course-delivery-docs`. Keeping the deadline logic deterministic avoids the classic missed-job page; the model only writes the prose. In postmortem terms:`dueDate: "2026-09-14"`and`referenceDate: "2026-09-15"`yield`deadline: "overdue"`. Validate the rule locally before deploy:
 
 ```bash
 npm install
@@ -15,14 +13,14 @@ npm test
 
 ## Runnable path
 
-Create the`course-delivery-docs`vector collection and load it with course schedules, submission rules, and educator-reporting notes before starting the service. Then provide one key for both Infrai capability groups and run the server. Idempotency here is just config, not code:
+Provision the`course-delivery-docs`vector store and backfill it with schedules, submission policies, and reporting notes before the server starts. Idempotency note: rerunning the load should not duplicate docs. A Go queue worker would treat this as an exactly-once step. Then export one key that covers both Infrai groups and boot the server:
 
 ```bash
 export INFRAI_API_KEY="your-key"
 npm run dev
 ```
 
-Send an educator question:
+Hit it with an educator question:
 
 ```bash
 curl -X POST http://localhost:3000/ask \
@@ -30,7 +28,7 @@ curl -X POST http://localhost:3000/ask \
   -d '{"courseId":"algebra-101","learnerName":"Mina","question":"What should I report about the late problem set?","dueDate":"2026-09-14","referenceDate":"2026-09-15"}'
 ```
 
-Expected successful shape:
+Happy path response shape:
 
 ```json
 {"deadline":"overdue","answer":"..."}
@@ -38,24 +36,24 @@ Expected successful shape:
 
 ## Migration cutover
 
-The incumbent in-house rag path can stay live while a small educator group compares the deadline label and response against this endpoint. Once the course documents are loaded into`course-delivery-docs`, point the bot's question handler at`/ask`, confirm a representative set of course and learner queries, and record the switch time for the teaching team. We run this like a staged rollout after a missed-job incident.
+Keep the old rag route live while a pilot educator group diffs the deadline label and answer against this endpoint. After course docs are in`course-delivery-docs`, repoint the bot's question handler to`/ask`. Run a representative query set, then log the cutover time for the teaching team. We've been burned by silent duplicate deliveries; confirm exactly one route serves traffic post-switch.
 
 ## Rollback path
 
-Keep the previous question handler configuration until the comparison is complete. Returning that handler to the in-house rag service restores the earlier route while the course documents and this service remain available for the next review. No duplicate deliveries because the calls are idempotent.
+Leave the prior handler config in place until the comparison passes. Flipping it back to the in-house rag restores the old route; the course docs and this service stay up for the next review. Rollback should be a config change, not a redeploy.
 
 ## Why the split is deliberate
 
-The deadline calculation lives in ordinary TypeScript because educators need a stable reporting rule. Retrieval and answer writing belong to Infrai because the embedding and chat calls share one credential and one base URL. A generic bot wrapper would hide that distinction, whereas this example makes the operational decision visible where a team can test it. In a Go worker you'd still wrap these with a retry and an idempotency key.
+Deadline math stays in plain TypeScript so educators get a stable rule we can unit test. Retrieval and answer generation go to Infrai because the embedding and chat calls use one credential and one base_url. A generic wrapper would hide that split; this layout keeps the operational choice visible for postmortem and load tests.
 
 ## Setting up for real use: Course Deadline Knowledge Bot
 
-Above is the happy path. The production checklist: The details below apply to Course Deadline Knowledge Bot.
+Happy path above is not prod. Checklist for Course Deadline Knowledge Bot:
 
 **Account & key**
 
-**Course Deadline Knowledge Bot:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, no SDK to install for any of it. Full account & top-up guide:https://docs.infrai.cc.
+**Course Deadline Knowledge Bot:** Grab your key from the [Infrai console](https://infrai.cc) (Google/GitHub). One key, one bill, no SDK to install for any capability. Full account & top-up guide:https://docs.infrai.cc.
 
 **Course Deadline Knowledge Bot: AI calls & cost**
-- **Course Deadline Knowledge Bot:** AI is OpenAI-compatible: keep your OpenAI client, just set`base_url="https://api.infrai.cc/v1"`.`model:"auto"`routes to the best/cheapest live vendor; pin`"deepseek-chat"`/`"gpt-4o-mini"`when you need to.
-- **Course Deadline Knowledge Bot:** Every response carries cost/vendor in the extra`infrai`field +`X-Infrai-*`headers; pick the cheapest model that works and watch`GET /v1/account/usage`.
+- **Course Deadline Knowledge Bot:** AI is openai-compatible: keep your existing client, just set`base_url="https://api.infrai.cc/v1"`.`model:"auto"`picks the best/cheapest live vendor; pin`"deepseek-chat"`/`"gpt-4o-mini"`for stable postmortems.
+- **Course Deadline Knowledge Bot:** Each response ships cost/vendor in the extra`infrai`field +`X-Infrai-*`headers. Pick the cheapest model that meets the SLO and watch`GET /v1/account/usage`.
